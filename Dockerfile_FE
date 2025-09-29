@@ -1,0 +1,37 @@
+# 构建Web应用
+FROM registry.cn-shanghai.aliyuncs.com/cong-cong/node:self AS builder
+COPY web /opt/web
+
+# 修改为正确写法（移除干扰注释，确保连接符完整）
+RUN --mount=type=cache,id=npm_cache,target=/root/.npm \
+    cd /opt/web && \
+    npm config set registry https://registry.npmmirror.com && \
+    npm config set cache /root/.npm && \
+    npm run build
+
+FROM registry.cn-shanghai.aliyuncs.com/cong-cong/ragflow:v0.16.0-slim
+USER root
+WORKDIR /ragflow
+# install dependencies from uv.lock file
+COPY pyproject.toml uv.lock ./
+
+# https://github.com/astral-sh/uv/issues/10462
+# uv records index url into uv.lock but doesn't failover among multiple indexes
+RUN --mount=type=cache,id=ragflow_uv,target=/root/.cache/uv,sharing=locked \
+        sed -i 's|pypi.org|pypi.tuna.tsinghua.edu.cn|g' uv.lock; \
+        uv sync --python 3.10 --frozen;
+#        uv sync --python 3.10 --frozen --all-extras;
+
+RUN rm -rf agent api deepdoc graphrag rag tools conf web
+COPY --from=builder /opt/web web
+COPY api api
+COPY conf conf
+COPY deepdoc deepdoc
+COPY tools tools
+COPY rag rag
+COPY agent agent
+COPY graphrag graphrag
+COPY docker/service_conf.yaml.template ./conf/service_conf.yaml.template
+COPY docker/entrypoint.sh ./
+RUN chmod +x ./entrypoint.sh
+ENTRYPOINT ["./entrypoint.sh"]

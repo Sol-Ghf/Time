@@ -1,0 +1,88 @@
+pipeline {
+    agent any
+    environment {
+        ENV_TYPE = ''
+        project_url = "http://192.168.140.231/bigdata/dataengine/ragflow.git"
+        credentialsId = "7d9c9e1e-6012-44cb-a0e9-889015718c13"
+        harbor = "192.168.140.224:5051/bigdata/ragflow"
+        ecr = "641366907140.dkr.ecr.us-east-2.amazonaws.com/dataplatform"
+    }
+    stages {
+        stage('check env') {
+            steps {
+                script {
+                    // 设置prod
+                    if ("${tag_name}" != "" && "${deploy_prod}" == "true") {
+                        ENV_TYPE = 'prod'
+                    } else if ("${deploy_prod}" == "false"){
+                        ENV_TYPE = 'dev'
+                    } else {
+                        error("未匹配到有效的命令参数，流水线条件运行不满足！！！")
+                    }
+                }
+            }
+        }
+
+        stage('pull Code') {
+            steps {
+                script {
+                    echo "环境类型: ${ENV_TYPE}"
+                    if (ENV_TYPE == 'dev'){
+                        echo "构建分支：dev"
+                        checkout scmGit(branches: [[name: "dev"]], extensions: [], userRemoteConfigs: [[url: "${project_url}", credentialsId: "${credentialsId}"]])
+                    } else {
+                        echo "构建tag：${tag_name}"
+                        checkout scmGit(branches: [[name: "${tag_name}"]], extensions: [], userRemoteConfigs: [[url: "${project_url}", credentialsId: "${credentialsId}"]])
+                    }
+                }
+            }
+        }
+
+
+        stage('build webchat FE') {
+            steps {
+                script {
+                        sh "docker run --name ragflow-build -v  /root/.npm:/root/.npm  --rm   -v ./:/opt/ registry.cn-shanghai.aliyuncs.com/cong-cong/node:self bash -c 'cd /opt/webchat ; npm config set registry https://registry.npmmirror.com ;rm -rf /package.json /yarn.lock ;  npm config set cache /root/.npm  ;npm install  ;npm run build'"
+                    }
+                }
+        }
+        stage('build ragflow FE') {
+            steps {
+                script {
+                        sh "docker run --name ragflow-build -v  /root/.npm:/root/.npm  --rm   -v ./:/opt/ registry.cn-shanghai.aliyuncs.com/cong-cong/node:self bash -c 'cd /opt/web ; npm config set registry https://registry.npmmirror.com ;rm -rf /package.json /yarn.lock ;  npm config set cache /root/.npm  ;npm install  ;npm run build'"
+                    }
+                }
+        }
+
+        stage('build image') {
+            steps {
+                script {
+                        def currentDate = java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"))
+                        def buildId = env.BUILD_ID
+                        env.BUILD_TAG = "${currentDate}_${buildId}"
+                        sh "docker build -t  ${harbor}:${env.BUILD_TAG} -f Dockerfile ."
+                    }
+                }
+        }
+        stage('push image') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'harbor', url: 'http://192.168.140.224:5051') {
+                        sh "docker push ${harbor}:${env.BUILD_TAG}"
+                    }
+                }
+            }
+        }
+        stage('deploy dev') {
+             steps {
+                 script {
+                    sh "sed -i 's|^RAGFLOW_IMAGE=.*|RAGFLOW_IMAGE=${harbor}:${env.BUILD_TAG}|' docker/.env"
+                    sh "scp docker/.env root@192.168.140.199:/root/deploy/.env"
+                    sh "scp docker/docker-compose.yml root@192.168.140.199:/root/deploy/docker-compose.yml"
+                    sh "scp -r docker/nginx/* root@192.168.140.199:/root/deploy/nginx/"
+                    sh "ssh root@192.168.140.199 'cd /root/deploy ;docker-compose stop ;docker-compose rm -f;docker-compose up -d'"
+             }
+          }
+       }
+    }
+}
